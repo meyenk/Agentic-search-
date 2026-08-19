@@ -1,0 +1,10 @@
+langgraph>=1.2.0
+google-genai>=0.7.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+pypdf>=5.0.0
+
+# System packages (not pip-installable — install via your OS package manager):
+#   - a LaTeX toolchain providing `latexmk` (e.g. texlive-full / MiKTeX)
+#   - poppler-utils, providing `pdftoppm` (used by nodes/latex_react.py to
+#     render compiled CVs to images for the vision quality check)

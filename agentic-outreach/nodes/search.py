@@ -19,20 +19,35 @@ import hashlib
 from google import genai
 
 from config import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_CALL_DELAY_SECS
-from sources.registry import ALL_SOURCES, JOB_SOURCES, ACADEMIC_SOURCES
+from sources.registry import (
+    ALL_SOURCES, JOB_SOURCES, ACADEMIC_SOURCES,
+    eligible_sources, onsite_location_mismatch, KNOWN_COVERAGE_GAPS, classify_geography,
+)
 from nodes.memory import load_lessons
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 log = logging.getLogger(__name__)
 
 
-def _source_descriptions(track: str) -> str:
-    pool = JOB_SOURCES if track == "job" else ACADEMIC_SOURCES if track == "professor" else ALL_SOURCES
+def _source_descriptions(pool: dict) -> str:
     lines = []
     for name, fn in pool.items():
         doc = (fn.__doc__ or "").strip().split("\n")[0]
         lines.append(f"- {name}: {doc}")
     return "\n".join(lines)
+
+
+def _coverage_gap_note(geography_text: str, excluded: list[str]) -> str:
+    """Builds an explicit, user-visible note about geography coverage gaps —
+    surfaced in the report rather than silently returning nothing for
+    regions with no free source. Only fires for KNOWN gap regions (Middle
+    East/APAC today), not just any exclusion."""
+    region_tags = classify_geography(geography_text)
+    gap_texts = [KNOWN_COVERAGE_GAPS[r] for r in region_tags if r in KNOWN_COVERAGE_GAPS]
+    if not gap_texts:
+        return ""
+    excluded_note = f" ({', '.join(excluded)} excluded this run.)" if excluded else ""
+    return " ".join(gap_texts) + excluded_note
 
 
 def _candidate_id(name: str, org: str) -> str:
@@ -100,11 +115,21 @@ def run_search_round(state: dict) -> dict:
     """LangGraph node — one round of the search loop."""
     profile = state["profile"]
     track = state["track"]
+    geography = profile.get("geography", "")
+
+    base_pool = JOB_SOURCES if track == "job" else ACADEMIC_SOURCES if track == "professor" else ALL_SOURCES
+    pool, excluded = eligible_sources(base_pool, geography)
+
+    # Compute the coverage-gap note once (geography doesn't change mid-run)
+    # and stash it in state so the report can surface it explicitly, rather
+    # than the candidate silently getting fewer results with no explanation.
+    if state.get("geography_coverage_note") is None:
+        state["geography_coverage_note"] = _coverage_gap_note(geography, excluded)
 
     profile_summary = (
         f"Track: {track}\n"
         f"Domains: {', '.join(profile.get('domains', []))}\n"
-        f"Geography: {profile.get('geography', '')}\n"
+        f"Geography: {geography}\n"
         f"Remote OK: {profile.get('remote_ok', True)}\n"
         f"Onsite preferred: {profile.get('onsite_preferred', True)}\n"
         f"Target start date: {profile.get('target_start_date', '')}\n"
@@ -129,10 +154,15 @@ def run_search_round(state: dict) -> dict:
             warm_start_text += f"\nCV-DERIVED WARM START (from setup): {warm_start}\n"
         if lessons:
             warm_start_text += f"\nLESSONS FROM PREVIOUS RUNS on this track: {lessons}\n"
+        if excluded:
+            warm_start_text += (
+                f"\nNOTE: {', '.join(excluded)} excluded this round — their known "
+                f"coverage doesn't match geography '{geography}'.\n"
+            )
 
     prompt = SEARCH_PROMPT.format(
         profile_summary=profile_summary,
-        sources=_source_descriptions(track),
+        sources=_source_descriptions(pool),
         history=history_text,
         feedback=feedback_text,
         warm_start=warm_start_text,
@@ -148,8 +178,8 @@ def run_search_round(state: dict) -> dict:
         calls = plan.get("calls", [])
         log.info(f"  Plan: {plan.get('reasoning', '')}")
     except Exception as e:
-        log.warning(f"  Could not parse search plan ({e}), falling back to first source")
-        first_source = list((JOB_SOURCES if track == "job" else ACADEMIC_SOURCES).keys())[0]
+        log.warning(f"  Could not parse search plan ({e}), falling back to first eligible source")
+        first_source = next(iter(pool.keys()))
         calls = [{"source": first_source, "query": " ".join(profile.get("domains", ["research"])), "location": ""}]
 
     new_candidates = []
@@ -158,9 +188,9 @@ def run_search_round(state: dict) -> dict:
         query = call.get("query", "")
         location = call.get("location", "")
 
-        fn = ALL_SOURCES.get(source_name)
+        fn = pool.get(source_name)
         if not fn:
-            log.warning(f"  Unknown source '{source_name}', skipping")
+            log.warning(f"  Unknown or geography-ineligible source '{source_name}', skipping")
             continue
 
         log.info(f"    → {source_name}(query='{query}', location='{location}')")
@@ -172,7 +202,15 @@ def run_search_round(state: dict) -> dict:
             log.warning(f"    {source_name} call failed: {e}")
             results = []
 
+        dropped_for_geo = 0
         for r in results:
+            # Onsite listings whose location clearly conflicts with the
+            # candidate's stated geography are dropped before they ever
+            # reach Rank — remote listings always pass through regardless.
+            if onsite_location_mismatch(r.get("location", ""), geography):
+                dropped_for_geo += 1
+                continue
+
             cid = _candidate_id(r.get("name", ""), r.get("org", ""))
             if cid in state["seen_ids"]:
                 continue
@@ -201,6 +239,9 @@ def run_search_round(state: dict) -> dict:
                 "why_this_role": None,
             }
             new_candidates.append(candidate)
+
+        if dropped_for_geo:
+            log.info(f"    Dropped {dropped_for_geo} onsite result(s) — location conflicts with geography '{geography}'")
 
         time.sleep(1)  # be polite to free APIs
 

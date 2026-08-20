@@ -30,18 +30,38 @@ or "good hits, keep searching this direction").
 CANDIDATE PROFILE:
 {profile_summary}
 
+CV FINGERPRINT (the actual candidate — skills, project outcomes, languages,
+seniority signals, domain focus; this is the real basis for a match, not just
+the "Domains" line above, which is only a few keywords the candidate typed):
+{cv_fingerprint}
+
 TRACK: {track}
 
 CANDIDATES TO SCORE:
 {candidates_json}
 
 For each candidate, score 0-10 based on:
-- Domain match with the profile's stated interests
+- HARD REQUIREMENTS CHECK FIRST — read the role/opportunity description for any
+  explicit hard requirement: a specific language fluency (e.g. "fluent German
+  required"), a required clearance, visa/work-authorization requirement, or a
+  mandatory certification. Cross-check each against the CV fingerprint above —
+  not just the "Domains" field. An UNMET hard requirement (the fingerprint gives
+  no indication the candidate has it) is a STRONG negative signal, more
+  damaging than a soft domain mismatch — score it low even if the domain and
+  seniority otherwise look like a great fit. Do not assume a requirement is met
+  just because the domain matches; only count it met if the fingerprint
+  actually supports it.
+- Domain match — compare against BOTH the "Domains" field AND the actual
+  skills/project focus described in the CV fingerprint. The fingerprint is the
+  more reliable signal when they diverge (e.g. "Domains" says "ML" broadly but
+  the fingerprint shows deep systems/infra focus with little modeling work —
+  that's a weaker match than the "Domains" field alone would suggest).
 - SENIORITY/EXPERIENCE FIT — read the actual job/role description for signals like
   required years of experience, seniority language ("senior", "lead", "principal"),
   or specific technical depth (e.g. a role wanting hands-on production model
   PRE-TRAINING experience is a much bigger ask than one wanting fine-tuning or
-  inference work). Compare this against the candidate's stated years of experience.
+  inference work). Compare this against the candidate's stated years of experience
+  AND what the fingerprint's project history actually shows.
   This is NOT a hard filter — do not zero out a role just because it looks senior —
   but a role clearly wanting 5+ years of a specific specialized skill the candidate
   has 0 years in should score meaningfully lower than a role at the candidate's
@@ -55,7 +75,7 @@ For each candidate, score 0-10 based on:
 Return ONLY valid JSON, no markdown:
 {{
   "scored": [
-    {{"id": "<candidate id>", "score": <float 0-10>, "reason": "<one sentence, mention seniority fit explicitly if it affected the score>"}}
+    {{"id": "<candidate id>", "score": <float 0-10>, "reason": "<one sentence, mention seniority fit explicitly if it affected the score, and mention an unmet hard requirement explicitly if that's why the score is low>"}}
   ],
   "round_verdict": "good" | "weak" | "empty",
   "feedback_notes": "<one concrete, actionable sentence for the next search round>"
@@ -105,6 +125,7 @@ def run_rank_round(state: dict) -> dict:
         f"Target start date (fixed-cycle programs only): {profile.get('target_start_date', '')}\n"
         f"Dealbreakers: {profile.get('dealbreakers', 'none')}"
     )
+    cv_fingerprint = profile.get("cv_fingerprint", "").strip() or "(no fingerprint available)"
 
     # Trim candidate payload sent to Gemini to keep tokens reasonable.
     # Description gets more room than before — seniority/experience signals
@@ -118,6 +139,7 @@ def run_rank_round(state: dict) -> dict:
 
     prompt = RANK_PROMPT.format(
         profile_summary=profile_summary,
+        cv_fingerprint=cv_fingerprint,
         track=state["track"],
         candidates_json=json.dumps(trimmed, indent=2),
     )

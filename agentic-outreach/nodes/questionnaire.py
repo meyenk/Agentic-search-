@@ -92,7 +92,7 @@ def run_questionnaire_cli() -> dict:
     track_map = {"1": "professor", "2": "job", "3": "both"}
     track = track_map.get(track, "both")
 
-    domains = input("Domain priority, comma-separated (e.g. SLAM, 3D perception, autonomous vehicles): ").strip()
+    domains = input("Domain priority, comma-separated (e.g. backend engineering, computational biology, climate policy): ").strip()
     geography = input("Geography preference (e.g. Europe, UK, remote-open): ").strip() or "Europe"
     remote_ok = input("Open to remote? (y/n) [y]: ").strip().lower() != "n"
     onsite_pref = input("Onsite preferred if available? (y/n) [y]: ").strip().lower() != "n"
@@ -116,12 +116,13 @@ def run_questionnaire_cli() -> dict:
 
     print(
         "\nAny instructions to keep in mind while the system modifies your CV per "
-        "application? Be as specific as you like. Example: 'Do not touch Formula "
-        "Student or Education/Achievements — those stay exactly as-is. BioSky "
-        "internship and the self-projects (Waymax, MedSAM) can be reordered or "
-        "reworded toward the role. Only make minor tweaks — reordering, small "
-        "rewording, adding a relevant skill keyword for ATS — never a major "
-        "rewrite or full section removal unless space genuinely requires it.'"
+        "application? Be as specific as you like. Example: 'Do not touch the "
+        "Debate Team entry or Education/Achievements — those stay exactly as-is. "
+        "The retail internship and the side projects (a budgeting app, a trivia "
+        "bot) can be reordered or reworded toward the role. Only make minor "
+        "tweaks — reordering, small rewording, adding a relevant skill keyword "
+        "for ATS — never a major rewrite or full section removal unless space "
+        "genuinely requires it.'"
     )
     cv_instructions = input("> ").strip()
 

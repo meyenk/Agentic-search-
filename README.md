@@ -4,6 +4,9 @@ Search↔Rank feedback loop discovers professors/jobs, scores them against your
 profile, and hands off to a fixed Tailor→Draft→Report sequence with a human
 checkpoint before anything gets sent.
 
+The project lives in [`agentic-outreach/`](./agentic-outreach) — `cd` in
+there before running any of the commands below.
+
 ## How it actually works
 
 ```
@@ -13,12 +16,13 @@ checkpoint before anything gets sent.
 ```
 
 **Search** asks Gemini which free source(s) to query this round (Arbeitnow,
-RemoteOK, The Muse, Remotive for jobs; OpenAlex, DBLP, Semantic Scholar,
-arXiv for academia) based on your profile and — critically — feedback from
-the *previous* round. **Rank** scores what Search found and writes back a
-concrete note like "results skew too senior, try postdoc-level terms" or
-"good hits, keep going" — that's the actual feedback loop, not just a
-linear pipeline.
+RemoteOK, The Muse, Remotive, Himalayas for jobs; OpenAlex, DBLP, Semantic
+Scholar, arXiv for academia) based on your profile and — critically —
+feedback from the *previous* round. **Rank** scores what Search found
+against both your stated preferences AND your actual CV fingerprint, and
+writes back a concrete note like "results skew too senior, try
+postdoc-level terms" or "good hits, keep going" — that's the actual
+feedback loop, not just a linear pipeline.
 
 Once 5 qualified candidates are found, the step budget (15 rounds) runs out,
 or 2 rounds in a row come back empty, the loop exits and hands off to a
@@ -29,23 +33,58 @@ generate the HTML review page.
 and either click "Open in Gmail" (professor track) or copy the "why this
 role" answer into the application portal yourself (job track).
 
+### Geography — structural source gating, not a hint
+
+Each source has a hardcoded coverage tag (`sources/registry.py`'s
+`COVERAGE`), and a lightweight keyword classifier maps your profile's
+free-text `geography` to a region. Search only offers Gemini sources whose
+coverage actually overlaps your region — Arbeitnow (Europe-only) simply
+isn't offered as an option for a Singapore search, rather than being
+offered and hoping the model skips it. If your geography text doesn't
+confidently map to a known region, this fails open (shows all sources)
+rather than silently narrowing your search on a guess.
+
+On top of source-level gating, individual ONSITE listings whose location
+text clearly conflicts with your geography at the country level (e.g. a
+Berlin listing when you said "UK") get dropped before they ever reach Rank
+— this is also what fixes results with an unmet language requirement
+sneaking through purely because the source was nominally "in Europe."
+Remote-tagged listings always pass through regardless of HQ location text.
+
+**Known gap, stated honestly rather than hidden:** there is currently no
+free, no-key source for *onsite* Middle East/Gulf or APAC roles — the real
+regional boards (Bayt, GulfTalent, NaukriGulf) have no free API, only paid
+third-party scraping. Himalayas covers *remote* roles filterable by those
+regions, but not local/onsite hiring. When your geography maps to one of
+these regions, the HTML report shows an explicit banner stating this gap
+and which source(s) were excluded, rather than just returning fewer
+results with no explanation.
+
+### CV fingerprint actually used in scoring
+
+Rank's rubric checks the role's stated hard requirements (language
+fluency, clearances, visa/work-authorization, certifications) against your
+full CV fingerprint — not just the "domains" field you typed at setup —
+and treats an unmet hard requirement as a much stronger negative than a
+soft domain mismatch.
+
 ### CV formatting — compile + vision ReAct loop
 
 Compile success alone doesn't catch a visually broken PDF — overflow,
 overlapping text, an orphaned section header can all happen while latexmk
-exits clean. Per-application CV tailoring (`cv_tailor.py`) now runs through
-a loop: compile → render the page(s) with `pdftoppm` → Gemini (vision)
+exits clean. Per-application CV tailoring (`cv_tailor.py`) runs through a
+loop: compile → render the page(s) with `pdftoppm` → Gemini (vision)
 checks the image for structural defects (not style/taste) → if flagged,
 the defect image + reason go back to Gemini for a small, targeted fix →
 recompile → recheck. Up to 3 attempts; every corrective edit is
 re-validated structurally (preamble/section guardrails) before being
 trusted. Still broken after 3 attempts → falls back to your untouched base
-CV, same as before — now visible in the report itself (each candidate's
-CV line is tagged "tailored" or "base CV (tailoring unavailable)").
+CV, visible in the report itself (each candidate's CV line is tagged
+"tailored" or "base CV (tailoring unavailable)").
 
-The base CV itself (`cv_base.tex`, from `--import-cv`) is treated as
-content-only and isn't run through this loop — formatting only drifts
-during per-application tailoring, so that's where the loop lives.
+`--import-cv` reconstruction runs through the same loop, adapted for a
+full reconstruction rather than a small edit — see "Updating your CV
+later" below.
 
 ### Cross-run memory + CV-derived warm start
 
@@ -55,20 +94,19 @@ a cold start, on top of the in-run feedback loop:
 - **Cross-run lessons.** At the end of every run, this run's Search↔Rank
   feedback gets distilled (via Gemini) into an evolving "lessons" memo per
   track, stored at `profile/search_lessons_<track>.txt`. Future runs read
-  it back in — so a recurring failure mode (e.g. "RemoteOK rarely returns
-  X for this domain") doesn't have to be rediscovered every run. This is a
-  merged, pruned summary, not a growing raw log.
+  it back in — so a recurring failure mode doesn't have to be rediscovered
+  every run. This is a merged, pruned summary, not a growing raw log.
 - **CV-derived warm start.** After the fixed questionnaire fields,
   `--setup` makes one more Gemini call that reads your CV fingerprint +
   answers and looks for real ambiguity worth disambiguating before the
-  first search round (e.g. a CV spanning two domains, a seniority
-  mismatch). It's conditional — most CVs won't trigger a question. Your
-  answer is saved as `search_warm_start` and injected straight into
-  Search's first-round prompt.
+  first search round. It's conditional — most CVs won't trigger a
+  question. Your answer is saved as `search_warm_start` and injected
+  straight into Search's first-round prompt.
 
 ## Setup (one-time, ~5 minutes)
 
 ```
+cd agentic-outreach
 pip install -r requirements.txt
 ```
 
@@ -76,11 +114,20 @@ You'll also need two system packages (not pip-installable) already on your
 PATH: a LaTeX toolchain providing `latexmk`, and `poppler-utils` providing
 `pdftoppm` (used to render compiled CVs for the vision quality check).
 
-Edit `config.py`:
-```python
-GEMINI_API_KEY = "your key from aistudio.google.com/apikey"
-GEMINI_MODEL   = "gemini-3.5-flash"
-YOUR_GITHUB    = "https://github.com/your-actual-username"
+Copy the env template and fill in your real values — `config.py` reads from
+these, and only `.env` (gitignored) ever holds your actual key/personal
+details, so this project is safe to keep in a public repo as-is:
+```
+cp .env.example .env
+```
+Edit `.env`:
+```
+GEMINI_API_KEY=your key from aistudio.google.com/apikey
+GEMINI_MODEL=gemini-3.5-flash
+YOUR_NAME=Your Full Name
+YOUR_EMAIL=you@example.com
+YOUR_LINKEDIN=https://www.linkedin.com/in/your-handle/
+YOUR_GITHUB=https://github.com/your-actual-username
 ```
 
 **Drop your resume PDF into `input/`** (any name, must be a text-based PDF —
@@ -99,9 +146,9 @@ directly, it's just LaTeX.
 
 Note: PDF text extraction quality varies by source. Most PDFs extract
 cleanly; some (particularly certain LaTeX-generated ones) can show minor
-spacing artifacts like "Ma y ank" instead of "Mayank" — Gemini generally
-corrects this contextually during reconstruction, but it's worth a glance
-at the preview.
+spacing artifacts like "Jo hn Do e" instead of "John Doe" — Gemini
+generally corrects this contextually during reconstruction, but it's worth
+a glance at the preview.
 
 Then run the questionnaire, which loads your CV fingerprint automatically:
 ```
@@ -126,6 +173,11 @@ Drop a new PDF in `input/` (replacing the old one) and re-run
 fingerprint. Your questionnaire answers in `profile/profile.json` are
 untouched — only re-run `--setup` if your preferences themselves changed.
 
+Name/email/LinkedIn/GitHub are extracted from your PDF and spliced onto the
+template's formatting directly — if a field genuinely isn't in your source
+PDF (e.g. no GitHub link), it stays as a placeholder rather than being
+invented.
+
 ## Sharing this with someone else
 
 Nothing in this pipeline is hardcoded to one person. Anyone can clone the
@@ -143,35 +195,7 @@ python run.py --track professor
 
 Takes a few minutes (rate-limited to stay within Gemini's free tier — 4
 second pause between calls). Opens the review page in your browser when
-done. Safe to run in the background (Windows Task Scheduler) while you work
-on something else.
-
-## What's verified vs. what needs a live test
-
-Tested this round, against the real toolchain in the build sandbox (not
-mocked):
-- `latexmk` compile + real error-log capture on a genuinely broken `.tex`
-  file, and on a well-formed one ✓
-- `pdftoppm` rendering a real compiled PDF to real PNG bytes ✓
-- The ReAct loop's control flow: compile-fail → fix → re-validate →
-  succeed; a fix that breaks structural validation aborting the loop
-  immediately rather than looping needlessly ✓
-- The lessons-memo persistence round-trip (`nodes/memory.py`) — write,
-  read back, and safely no-op (not wipe) on a failed merge ✓
-
-Everything else — source parsing, Search's Gemini-plan parsing → candidate
-normalization, Rank's scoring, full graph routing — is tested with mocked
-API/Gemini responses, same as before.
-
-**Not yet tested against the real internet + your real Gemini key** — the
-sandbox this was built in only allowlists a handful of domains (pypi,
-github), so Arbeitnow/OpenAlex/Remotive/arXiv/Gemini calls (including the
-new vision quality check) couldn't be exercised for real here — the vision
-call was confirmed to fail open (treats a blocked/errored call as "clean"
-rather than blocking a candidate) when it hit the sandbox's network
-allowlist, which is the one live signal available. Your first live run is
-the real test. If something breaks, the log at `logs/pipeline.log` will
-show exactly which round/source/call failed.
+done. Safe to run in the background while you work on something else.
 
 ## File structure
 
@@ -180,11 +204,13 @@ agentic-outreach/
 ├── run.py                 ← entry point
 ├── graph.py                ← LangGraph wiring (the loop lives here)
 ├── state.py                 ← shared state schema
-├── config.py                ← your API key + tuning knobs
+├── config.py                ← reads secrets/personal details from .env; tuning knobs
+├── .env.example              ← template — copy to .env and fill in (gitignored)
+├── .gitignore                 ← excludes .env, personal generated data, runtime output
 ├── input/                    ← drop your resume PDF here
 ├── templates/skeleton.tex     ← person-agnostic LaTeX template used by import
 ├── cv_base.tex                 ← generated from your PDF (edit directly if needed)
-├── sources/registry.py          ← the 8 free-API tools Search picks from
+├── sources/registry.py          ← the 9 free-API tools Search picks from + geography gating
 ├── nodes/
 │   ├── cv_import.py                 ← PDF → LaTeX reconstruction + fingerprint
 │   ├── questionnaire.py               ← one-time setup + CV-derived warm-start question
@@ -213,3 +239,16 @@ agentic-outreach/
 - `DRAFTS_PER_RUN` — target candidates to fully process (default 5)
 - `QUALITY_THRESHOLD` — score out of 10 to count as qualified (default 6.0)
 - `ROUNDS_BEFORE_GIVE_UP` — consecutive weak rounds before stopping early (default 2)
+
+## Testing status
+
+The compile/render toolchain (`latexmk`, `pdftoppm`), the ReAct loops'
+control flow (compile-fail → fix → re-validate → succeed, and correctly
+aborting when a fix breaks structural validation), the geography-gating
+logic, and the cross-run lessons persistence have all been exercised
+against the real toolchain, not just mocked. Source parsing, Search's
+plan-parsing, Rank's scoring, and full graph routing are covered by
+mocked-response tests. Not yet exercised: a live run against the real
+internet + a real Gemini key — Arbeitnow/OpenAlex/Himalayas/arXiv/Gemini
+calls haven't been made for real. If something breaks on your first live
+run, `logs/pipeline.log` will show exactly which round/source/call failed.

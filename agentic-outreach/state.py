@@ -54,6 +54,7 @@ class GraphState(TypedDict):
     feedback_log: list[SearchFeedback]
     candidates: list[Candidate]   # accumulates across the loop
     seen_ids: list[str]           # dedup guard
+    geography_coverage_note: Optional[str]  # sources excluded due to region mismatch, for the report
 
     # ── after loop exits ───────────────────────────────
     qualified: list[Candidate]    # score >= threshold, up to DRAFTS_PER_RUN

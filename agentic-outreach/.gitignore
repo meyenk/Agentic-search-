@@ -1,0 +1,24 @@
+# Secrets — never commit real values
+.env
+
+# Personal data — generated from YOUR resume/answers, not shareable template content
+input/*.pdf
+cv_base.tex
+cv_base_preview.pdf
+profile/profile.json
+profile/cv_fingerprint.txt
+profile/search_lessons_*.txt
+
+# Runtime-generated output
+output/
+cv_versions/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS cruft
+.DS_Store

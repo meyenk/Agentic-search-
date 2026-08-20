@@ -114,6 +114,7 @@ def run_pipeline(profile: dict, track: str) -> dict:
         "feedback_log": [],
         "candidates": [],
         "seen_ids": [],
+        "geography_coverage_note": None,
         "qualified": [],
         "stop_reason": "",
         "finished": [],

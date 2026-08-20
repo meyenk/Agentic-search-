@@ -119,6 +119,14 @@ def generate_report(state: dict) -> str:
 
     stop_note = f"<p style='color:#6b7280;font-size:13px'>Search stopped: {state.get('stop_reason','')}</p>"
 
+    geo_note = state.get("geography_coverage_note", "")
+    coverage_box = (
+        f'<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;'
+        f'padding:12px 16px;margin-bottom:16px;font-size:13px;color:#78350f">'
+        f'⚠️ <strong>Geography coverage gap:</strong> {geo_note}</div>'
+        if geo_note else ""
+    )
+
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Outreach Drafts — {timestamp}</title>
@@ -129,6 +137,7 @@ def generate_report(state: dict) -> str:
 <h1>📬 {len(finished)} Drafts Ready</h1>
 <div class="meta">Generated {datetime.now().strftime("%d %b %Y, %H:%M")}</div>
 {stop_note}
+{coverage_box}
 {cards}
 </div>
 <script>

@@ -13,22 +13,105 @@ import re
 import time
 import logging
 import requests
+from bs4 import BeautifulSoup
 
 log = logging.getLogger(__name__)
 
 REQUEST_HEADERS = {"User-Agent": "outreach-pipeline/1.0 (personal research tool)"}
 
+DESCRIPTION_CHAR_BUDGET = 900
+
+# Heading text (not body text) that conventionally marks a requirements/
+# qualifications section across the ATS platforms Arbeitnow aggregates from
+# (Greenhouse, SmartRecruiters, Team Tailor, Recruitee, Comeet, Join.com) —
+# used only to find WHERE that section is, never to search for a specific
+# requirement like "PhD". EN + DE since Arbeitnow skews Germany-heavy.
+REQUIREMENTS_HEADING_KEYWORDS = [
+    "qualifikation", "anforderungen", "dein profil", "ihr profil", "voraussetzungen",
+    "das bringst du mit", "requirements", "qualifications", "what you bring",
+    "what you'll bring", "about you", "who you are", "your profile",
+    "skills and experience", "what we're looking for", "what you need",
+]
+
+
+def _extract_relevant_description(html: str, budget: int = DESCRIPTION_CHAR_BUDGET) -> str:
+    """Prefers the posting's own requirements/qualifications section (found by
+    its heading text) over a flat prefix. Arbeitnow passes through raw,
+    ATS-sourced HTML that's usually broken into heading-delimited sections in
+    whatever order the poster chose — a flat [:budget] slice from byte 0
+    reliably misses whatever comes after the intro/tasks blurb, which is
+    exactly what let a PhD-level role read as a good match once. Falls back
+    to the old flat-slice behavior (now with tags stripped) whenever no
+    heading looks like a requirements section, or there are no headings at
+    all — not every source posting is this well-structured."""
+    if not html:
+        return ""
+
+    soup = BeautifulSoup(html, "html.parser")
+    headings = soup.find_all(["h1", "h2", "h3", "h4"])
+
+    requirements_text = ""
+    for h in headings:
+        label = h.get_text(" ", strip=True).lower()
+        if not any(kw in label for kw in REQUIREMENTS_HEADING_KEYWORDS):
+            continue
+        parts = []
+        for sib in h.find_next_siblings():
+            if sib.name in ("h1", "h2", "h3", "h4"):
+                break
+            parts.append(sib.get_text(" ", strip=True))
+        requirements_text = " ".join(p for p in parts if p).strip()
+        if requirements_text:
+            break
+
+    plain_text = soup.get_text(" ", strip=True)
+
+    if not requirements_text:
+        return plain_text[:budget]
+
+    requirements_text = requirements_text[: budget - 40]
+    prefix = f"[Qualifications/Requirements] {requirements_text}  "
+    return (prefix + plain_text[: max(0, budget - len(prefix))]).strip()[:budget]
+
+
+def _normalize_key(value) -> str:
+    return re.sub(r"[\s_-]+", " ", str(value).strip().lower())
+
+
+def _normalize_enum(value, mapping: dict, label: str) -> str | None:
+    """Maps a planner-supplied value onto a source's real documented enum
+    (case/spacing-insensitive), or returns None and logs a warning if it
+    doesn't match anything — so a malformed or hallucinated filter value is
+    silently dropped rather than sent to the API and either erroring or (worse)
+    being silently ignored server-side with no signal that it did nothing."""
+    if value is None or value == "":
+        return None
+    key = _normalize_key(value)
+    normalized = mapping.get(key)
+    if normalized is None:
+        log.warning(f"  Unrecognized {label} value '{value}' — ignoring this filter.")
+    return normalized
+
 
 # ── JOB SOURCES ──────────────────────────────────────────────
 
-def search_arbeitnow(query: str, location: str = "") -> list[dict]:
+def search_arbeitnow(query: str, location: str = "", visa_sponsorship=None, **kwargs) -> list[dict]:
     """
     Arbeitnow — free, no key, strong for UK/Europe tech & engineering roles,
-    internships and graduate schemes included.
+    internships and graduate schemes included. Supports an explicit
+    visa_sponsorship=true/false filter (Arbeitnow's own documented API
+    parameter) — use it when the candidate's dealbreakers require visa
+    sponsorship, rather than guessing from description text.
     """
     try:
+        params = {}
+        if visa_sponsorship is not None:
+            if isinstance(visa_sponsorship, str):
+                visa_sponsorship = visa_sponsorship.strip().lower() in ("true", "yes", "1")
+            params["visa_sponsorship"] = "true" if visa_sponsorship else "false"
+
         r = requests.get("https://www.arbeitnow.com/api/job-board-api",
-                          timeout=10, headers=REQUEST_HEADERS)
+                          params=params, timeout=10, headers=REQUEST_HEADERS)
         data = r.json().get("data", [])
         out = []
         for job in data:
@@ -40,7 +123,7 @@ def search_arbeitnow(query: str, location: str = "") -> list[dict]:
                 "org": job.get("company_name", ""),
                 "location": ", ".join(job.get("location", "").split(",")[:2]) if job.get("location") else "Remote/UK",
                 "url": job.get("url", ""),
-                "description": (job.get("description", "") or "")[:600],
+                "description": _extract_relevant_description(job.get("description", "") or ""),
                 "posted_date": job.get("created_at", ""),
                 "source": "arbeitnow",
             })
@@ -50,7 +133,7 @@ def search_arbeitnow(query: str, location: str = "") -> list[dict]:
         return []
 
 
-def search_remoteok(query: str, location: str = "") -> list[dict]:
+def search_remoteok(query: str, location: str = "", **kwargs) -> list[dict]:
     """
     RemoteOK — free, no key, remote-only tech roles globally.
     Best when candidate is open to fully remote positions.
@@ -80,25 +163,75 @@ def search_remoteok(query: str, location: str = "") -> list[dict]:
         return []
 
 
-def search_themuse(query: str, location: str = "") -> list[dict]:
+MUSE_CATEGORY_VALUES = {
+    _normalize_key(v): v for v in [
+        "Accounting", "Accounting and Finance", "Account Management",
+        "Account Management/Customer Success", "Administration and Office",
+        "Advertising and Marketing", "Animal Care", "Arts", "Business Operations",
+        "Cleaning and Facilities", "Computer and IT", "Construction", "Corporate",
+        "Customer Service", "Data and Analytics", "Data Science", "Design",
+        "Design and UX", "Editor", "Education", "Energy Generation and Mining",
+        "Entertainment and Travel Services", "Farming and Outdoors",
+        "Food and Hospitality Services", "Healthcare", "HR",
+        "Human Resources and Recruitment", "Installation/Maintenance/Repairs", "IT",
+        "Law", "Legal Services", "Management", "Manufacturing and Warehouse",
+        "Marketing", "Mechanic", "Media/PR/Communications", "Mental Health",
+        "Nurses", "Office Administration", "Personal Care and Services",
+        "Physical Assistant", "Product", "Product Management",
+        "Project Management", "Protective Services", "Public Relations",
+        "Real Estate", "Recruiting", "Retail", "Sales",
+        "Science and Engineering", "Social Services", "Software Engineer",
+        "Software Engineering", "Sports/Fitness/Recreation",
+        "Transportation and Logistics", "UX", "Videography", "Writer",
+        "Writing and Editing",
+    ]
+}
+MUSE_LEVEL_VALUES = {
+    _normalize_key(v): v for v in ["Entry Level", "Mid Level", "Senior Level", "Management", "Internship"]
+}
+
+
+def search_themuse(query: str, location: str = "", category=None, level=None, **kwargs) -> list[dict]:
     """
     The Muse — free, no key, decent for grad schemes and early-career roles,
-    mostly US with some international listings.
+    mostly US with some international listings. `category` and `level` are
+    The Muse's own documented filters, NOT free text — pass the single
+    closest matching value, exactly as spelled here. category options:
+    Computer and IT, Data Science, IT, Product, Product Management, Science
+    and Engineering, Software Engineer, Software Engineering, UX, Design,
+    Design and UX (plus many non-technical categories not worth listing
+    here). level options: Entry Level, Mid Level, Senior Level, Management,
+    Internship — set this from years of experience, e.g. under 2 years ->
+    Entry Level, to filter out senior-track roles server-side rather than
+    hoping "junior"/"graduate" appears in the query. The `query` string
+    itself has no server-side equivalent here (The Muse has no keyword-search
+    param) — it's matched client-side against title/description on top of
+    whatever category/level filters are set.
     """
     try:
+        params = {"page": 0}
+        category_value = _normalize_enum(category, MUSE_CATEGORY_VALUES, "The Muse category")
+        if category_value:
+            params["category"] = category_value
+        level_value = _normalize_enum(level, MUSE_LEVEL_VALUES, "The Muse level")
+        if level_value:
+            params["level"] = level_value
+
         r = requests.get("https://www.themuse.com/api/public/jobs",
-                          params={"category": query, "page": 0},
-                          timeout=10, headers=REQUEST_HEADERS)
+                          params=params, timeout=10, headers=REQUEST_HEADERS)
         data = r.json().get("results", [])
         out = []
         for job in data:
+            text = f"{job.get('name','')} {job.get('contents','')}".lower()
+            if query and query.lower() not in text and not any(w in text for w in query.lower().split()):
+                continue
             locations = ", ".join(l.get("name", "") for l in job.get("locations", []))
             out.append({
                 "name": job.get("name", ""),
                 "org": job.get("company", {}).get("name", ""),
                 "location": locations,
                 "url": job.get("refs", {}).get("landing_page", ""),
-                "description": (job.get("contents", "") or "")[:600],
+                "description": _extract_relevant_description(job.get("contents", "") or ""),
                 "posted_date": job.get("publication_date", ""),
                 "source": "themuse",
             })
@@ -108,7 +241,7 @@ def search_themuse(query: str, location: str = "") -> list[dict]:
         return []
 
 
-def search_remotive(query: str, location: str = "") -> list[dict]:
+def search_remotive(query: str, location: str = "", **kwargs) -> list[dict]:
     """
     Remotive — free, no key, remote-only tech/design/marketing roles globally.
     Different underlying board coverage than RemoteOK — use both if remote
@@ -135,18 +268,35 @@ def search_remotive(query: str, location: str = "") -> list[dict]:
         return []
 
 
-def search_himalayas(query: str, location: str = "") -> list[dict]:
+HIMALAYAS_SENIORITY_VALUES = {
+    _normalize_key(v): v for v in
+    ["Entry-level", "Mid-level", "Senior", "Manager", "Director", "Executive"]
+}
+
+
+def search_himalayas(query: str, location: str = "", seniority=None, **kwargs) -> list[dict]:
     """
     Himalayas — free, no key, remote-only jobs with a REAL country filter
-    (ISO code, country name, or 'worldwide'). Unlike RemoteOK/Remotive/
-    Arbeitnow, this is the one job source that can actually be filtered by
-    geography server-side — best pick for APAC/Middle East/non-Europe
-    candidates who only want remote roles open to their region.
+    (ISO code, country name, or 'worldwide') AND a REAL seniority filter —
+    Himalayas' own documented API param, one of exactly these values:
+    Entry-level, Mid-level, Senior, Manager, Director, Executive. Set this
+    from the candidate's actual years of experience whenever plausible (e.g.
+    1 year -> Entry-level) instead of trusting title keywords like "junior"
+    or "graduate" in the query string, which other sources don't reliably
+    honor. Unlike RemoteOK/Remotive/Arbeitnow, this is the one job source
+    that can actually be filtered by BOTH geography and seniority
+    server-side — best pick for APAC/Middle East/non-Europe candidates who
+    only want remote roles open to their region, or whenever a seniority
+    mismatch has been a recurring problem in feedback.
     """
     try:
         params = {"q": query}
         if location:
             params["country"] = location
+        seniority_value = _normalize_enum(seniority, HIMALAYAS_SENIORITY_VALUES, "Himalayas seniority")
+        if seniority_value:
+            params["seniority"] = seniority_value
+
         r = requests.get("https://himalayas.app/jobs/api/search",
                           params=params, timeout=10, headers=REQUEST_HEADERS)
         payload = r.json()
@@ -161,7 +311,7 @@ def search_himalayas(query: str, location: str = "") -> list[dict]:
                 "org": job.get("companyName", ""),
                 "location": ", ".join(locs) if isinstance(locs, list) else str(locs),
                 "url": job.get("applicationLink", ""),
-                "description": (job.get("excerpt", "") or "")[:600],
+                "description": _extract_relevant_description(job.get("excerpt", "") or ""),
                 "posted_date": job.get("pubDate", ""),
                 "source": "himalayas",
             })
@@ -173,7 +323,7 @@ def search_himalayas(query: str, location: str = "") -> list[dict]:
 
 # ── ACADEMIC SOURCES ─────────────────────────────────────────
 
-def search_openalex(query: str, location: str = "") -> list[dict]:
+def search_openalex(query: str, location: str = "", **kwargs) -> list[dict]:
     """
     OpenAlex — free, no key, 10M+ researchers. Best broad academic source —
     filterable by topic and returns structured author + institution data.
@@ -209,7 +359,7 @@ def search_openalex(query: str, location: str = "") -> list[dict]:
         return []
 
 
-def search_dblp(query: str, location: str = "") -> list[dict]:
+def search_dblp(query: str, location: str = "", **kwargs) -> list[dict]:
     """
     DBLP — free, no key, clean CS-specific author search by keyword.
     Good for cross-checking OpenAlex results against CS-specific publication record.
@@ -246,7 +396,7 @@ def search_dblp(query: str, location: str = "") -> list[dict]:
         return []
 
 
-def search_semantic_scholar(query: str, location: str = "") -> list[dict]:
+def search_semantic_scholar(query: str, location: str = "", **kwargs) -> list[dict]:
     """
     Semantic Scholar — free, no key. Returns paper authors with abstracts,
     useful for judging research relevance in more depth than DBLP/OpenAlex alone.
@@ -282,7 +432,7 @@ def search_semantic_scholar(query: str, location: str = "") -> list[dict]:
         return []
 
 
-def search_arxiv(query: str, location: str = "") -> list[dict]:
+def search_arxiv(query: str, location: str = "", **kwargs) -> list[dict]:
     """
     arXiv — free, no key, official API. Best for the NEWEST preprints —
     surfaces papers before they're indexed by OpenAlex/Semantic Scholar, so

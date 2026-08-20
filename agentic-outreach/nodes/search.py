@@ -30,9 +30,15 @@ log = logging.getLogger(__name__)
 
 
 def _source_descriptions(pool: dict) -> str:
+    """Full docstring per source, collapsed to one flowing line — was
+    previously truncated to just the docstring's first line, which silently
+    hid any documented optional filter (e.g. visa_sponsorship, seniority,
+    category/level enums) written on later lines. Sources without a
+    multi-line docstring are unaffected."""
     lines = []
     for name, fn in pool.items():
-        doc = (fn.__doc__ or "").strip().split("\n")[0]
+        doc = (fn.__doc__ or "").strip()
+        doc = " ".join(line.strip() for line in doc.splitlines() if line.strip())
         lines.append(f"- {name}: {doc}")
     return "\n".join(lines)
 
@@ -84,6 +90,13 @@ Think about which source is most likely to surface genuinely relevant, current r
 given the profile and any feedback above. Vary your query terms round to round —
 don't repeat an identical query that already returned nothing useful.
 
+A call may include extra named fields beyond source/query/location, ONLY when that source's
+own description above explicitly documents a filter (e.g. "visa_sponsorship=true/false",
+"seniority: Entry-level|Mid-level|...", "category: <one of the listed options>") AND the
+candidate profile actually justifies using it. Use the EXACT value spelling/casing the source
+documents. Omit a field entirely when the source doesn't document it, or the profile doesn't
+justify it — don't invent a filter.
+
 Return ONLY valid JSON, no markdown:
 {{
   "calls": [
@@ -133,6 +146,8 @@ def run_search_round(state: dict) -> dict:
         f"Remote OK: {profile.get('remote_ok', True)}\n"
         f"Onsite preferred: {profile.get('onsite_preferred', True)}\n"
         f"Target start date: {profile.get('target_start_date', '')}\n"
+        f"Years of experience: {profile.get('years_experience', '0')}\n"
+        f"Dealbreakers: {profile.get('dealbreakers', 'none')}\n"
         f"CV fingerprint: {profile.get('cv_fingerprint', '')[:500]}"
     )
 
@@ -187,17 +202,22 @@ def run_search_round(state: dict) -> dict:
         source_name = call.get("source", "")
         query = call.get("query", "")
         location = call.get("location", "")
+        # Any extra field Gemini included in the call (e.g. visa_sponsorship)
+        # gets passed straight through as a kwarg — sources that don't
+        # recognize it just ignore it via **kwargs, so this doesn't require
+        # per-source dispatch logic here.
+        extra = {k: v for k, v in call.items() if k not in ("source", "query", "location")}
 
         fn = pool.get(source_name)
         if not fn:
             log.warning(f"  Unknown or geography-ineligible source '{source_name}', skipping")
             continue
 
-        log.info(f"    → {source_name}(query='{query}', location='{location}')")
+        log.info(f"    → {source_name}(query='{query}', location='{location}'{', ' + str(extra) if extra else ''})")
         state["search_history"].append(f"{source_name}: '{query}' / '{location}'")
 
         try:
-            results = fn(query, location)
+            results = fn(query, location, **extra)
         except Exception as e:
             log.warning(f"    {source_name} call failed: {e}")
             results = []

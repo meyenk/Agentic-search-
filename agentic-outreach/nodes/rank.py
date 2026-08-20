@@ -128,13 +128,15 @@ def run_rank_round(state: dict) -> dict:
     cv_fingerprint = profile.get("cv_fingerprint", "").strip() or "(no fingerprint available)"
 
     # Trim candidate payload sent to Gemini to keep tokens reasonable.
-    # Description gets more room than before — seniority/experience signals
-    # ("5+ years", "pre-training experience", "senior") are often further into
-    # the text than the first 300 chars, and truncating too early was hiding
-    # exactly the information Rank needs to judge seniority fit.
+    # 900 matches sources/registry.py's DESCRIPTION_CHAR_BUDGET (where
+    # Arbeitnow descriptions are now built with the requirements/
+    # qualifications section prioritized first) — this slice is a safety net
+    # for sources that return longer raw text, not the active truncator, so
+    # it must not be smaller than that budget or it'll cut off exactly the
+    # section that was just prioritized.
     trimmed = [{
         "id": c["id"], "name": c["name"], "org": c["org"], "location": c["location"],
-        "description": c["description"][:600], "start_date_match": c["start_date_match"],
+        "description": c["description"][:900], "start_date_match": c["start_date_match"],
     } for c in unranked[:10]]  # slightly smaller batch to offset the longer descriptions
 
     prompt = RANK_PROMPT.format(

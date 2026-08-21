@@ -78,6 +78,20 @@ def _normalize_key(value) -> str:
     return re.sub(r"[\s_-]+", " ", str(value).strip().lower())
 
 
+def _location_allowed(job_location_text: str, requested_location: str) -> bool:
+    """Soft client-side location filter for sources whose API takes a
+    `location` param in their docstring/signature but has no real server-side
+    location filter to send it to (Arbeitnow, The Muse) — without this, the
+    planner-supplied location is silently discarded and results skew toward
+    wherever the source's underlying data happens to concentrate. Same
+    fail-open philosophy as onsite_location_mismatch (defined below): only
+    excludes a listing when both sides name a specific, disagreeing country;
+    remote/unclear/unlabeled listings always pass through."""
+    if not requested_location:
+        return True
+    return not onsite_location_mismatch(job_location_text, requested_location)
+
+
 def _normalize_enum(value, mapping: dict, label: str) -> str | None:
     """Maps a planner-supplied value onto a source's real documented enum
     (case/spacing-insensitive), or returns None and logs a warning if it
@@ -95,14 +109,10 @@ def _normalize_enum(value, mapping: dict, label: str) -> str | None:
 
 # ── JOB SOURCES ──────────────────────────────────────────────
 
-def search_arbeitnow(query: str, location: str = "", visa_sponsorship=None, **kwargs) -> list[dict]:
-    """
-    Arbeitnow — free, no key, strong for UK/Europe tech & engineering roles,
-    internships and graduate schemes included. Supports an explicit
-    visa_sponsorship=true/false filter (Arbeitnow's own documented API
-    parameter) — use it when the candidate's dealbreakers require visa
-    sponsorship, rather than guessing from description text.
-    """
+def _search_arbeitnow_impl(base_url: str, source_tag: str, default_location: str,
+                            query: str, location: str, visa_sponsorship) -> list[dict]:
+    """Shared implementation for the two Arbeitnow boards (main .com and the
+    UK-specific .co.uk one added in 2026) — same API shape, different data."""
     try:
         params = {}
         if visa_sponsorship is not None:
@@ -110,27 +120,63 @@ def search_arbeitnow(query: str, location: str = "", visa_sponsorship=None, **kw
                 visa_sponsorship = visa_sponsorship.strip().lower() in ("true", "yes", "1")
             params["visa_sponsorship"] = "true" if visa_sponsorship else "false"
 
-        r = requests.get("https://www.arbeitnow.com/api/job-board-api",
-                          params=params, timeout=10, headers=REQUEST_HEADERS)
+        r = requests.get(base_url, params=params, timeout=10, headers=REQUEST_HEADERS)
         data = r.json().get("data", [])
         out = []
         for job in data:
             text = f"{job.get('title','')} {job.get('description','')}".lower()
             if query.lower() not in text and not any(w in text for w in query.lower().split()):
                 continue
+            job_location = job.get("location", "")
+            if not _location_allowed(job_location, location):
+                continue
             out.append({
                 "name": job.get("title", ""),
                 "org": job.get("company_name", ""),
-                "location": ", ".join(job.get("location", "").split(",")[:2]) if job.get("location") else "Remote/UK",
+                "location": ", ".join(job_location.split(",")[:2]) if job_location else default_location,
                 "url": job.get("url", ""),
                 "description": _extract_relevant_description(job.get("description", "") or ""),
                 "posted_date": job.get("created_at", ""),
-                "source": "arbeitnow",
+                "source": source_tag,
             })
         return out[:15]
     except Exception as e:
-        log.warning(f"Arbeitnow search failed: {e}")
+        log.warning(f"{source_tag} search failed: {e}")
         return []
+
+
+def search_arbeitnow(query: str, location: str = "", visa_sponsorship=None, **kwargs) -> list[dict]:
+    """
+    Arbeitnow (main board, arbeitnow.com) — free, no key, aggregates from ATS
+    platforms (Greenhouse, SmartRecruiters, etc.) and skews Germany/DACH-heavy.
+    Decent for broad-Europe tech & engineering roles, internships and
+    graduate schemes — but NOT UK-specific; use search_arbeitnow_uk instead
+    when the candidate's geography is the UK specifically, since that's a
+    separate, dedicated UK board with actual UK listings. Supports an
+    explicit visa_sponsorship=true/false filter (Arbeitnow's own documented
+    API parameter) — use it when the candidate's dealbreakers require visa
+    sponsorship, rather than guessing from description text.
+    """
+    return _search_arbeitnow_impl(
+        "https://www.arbeitnow.com/api/job-board-api", "arbeitnow", "Remote",
+        query, location, visa_sponsorship,
+    )
+
+
+def search_arbeitnow_uk(query: str, location: str = "", visa_sponsorship=None, **kwargs) -> list[dict]:
+    """
+    Arbeitnow UK (arbeitnow.co.uk) — free, no key, Arbeitnow's dedicated UK
+    job board API, launched 2026, separate from the main arbeitnow.com board
+    (which is DACH/Europe-heavy and largely misses UK roles). Use this one
+    whenever the candidate's geography is the UK specifically — it's the
+    Arbeitnow variant actually populated with UK-based tech & engineering
+    roles, internships and graduate schemes. Same visa_sponsorship=true/false
+    filter as the main board.
+    """
+    return _search_arbeitnow_impl(
+        "https://www.arbeitnow.co.uk/api/job-board-api", "arbeitnow_uk", "United Kingdom",
+        query, location, visa_sponsorship,
+    )
 
 
 def search_remoteok(query: str, location: str = "", **kwargs) -> list[dict]:
@@ -226,6 +272,8 @@ def search_themuse(query: str, location: str = "", category=None, level=None, **
             if query and query.lower() not in text and not any(w in text for w in query.lower().split()):
                 continue
             locations = ", ".join(l.get("name", "") for l in job.get("locations", []))
+            if not _location_allowed(locations, location):
+                continue
             out.append({
                 "name": job.get("name", ""),
                 "org": job.get("company", {}).get("name", ""),
@@ -480,6 +528,7 @@ def search_arxiv(query: str, location: str = "", **kwargs) -> list[dict]:
 
 JOB_SOURCES = {
     "search_arbeitnow": search_arbeitnow,
+    "search_arbeitnow_uk": search_arbeitnow_uk,
     "search_remoteok": search_remoteok,
     "search_themuse": search_themuse,
     "search_remotive": search_remotive,
@@ -510,6 +559,7 @@ ALL_SOURCES = {**JOB_SOURCES, **ACADEMIC_SOURCES}
 
 COVERAGE = {
     "search_arbeitnow": {"europe"},
+    "search_arbeitnow_uk": {"europe"},
     "search_remoteok": {"remote_global"},
     "search_themuse": {"us", "remote_global"},
     "search_remotive": {"remote_global"},
@@ -534,23 +584,61 @@ KNOWN_COVERAGE_GAPS = {
             "hiring in most APAC markets.",
 }
 
-EUROPE_COUNTRIES = ["germany", "uk", "united kingdom", "britain", "france", "spain",
-                     "netherlands", "poland", "ireland", "portugal", "italy", "sweden",
-                     "switzerland", "austria", "belgium", "denmark", "norway", "finland"]
-US_COUNTRIES = ["us", "usa", "united states", "america"]
-APAC_COUNTRIES = ["india", "singapore", "japan", "china", "australia", "new zealand", "korea",
-                   "philippines", "vietnam", "indonesia", "hong kong", "thailand", "malaysia"]
-MIDDLE_EAST_COUNTRIES = ["uae", "dubai", "abu dhabi", "saudi", "qatar", "kuwait", "bahrain",
-                          "oman", "israel"]
+
+# Canonical country -> recognized text variants. Grouped by canonical name
+# (rather than one flat keyword list) because _country_hits below needs to
+# return the SAME key for "UK" and "United Kingdom" — comparisons downstream
+# (onsite_location_mismatch, _location_allowed) test set membership, so two
+# spellings of the same country that resolved to different strings would
+# either wrongly drop a genuine match or wrongly pass a real mismatch,
+# depending on which spelling each side happened to use.
+EUROPE_COUNTRY_VARIANTS = {
+    "uk": ["uk", "united kingdom", "britain", "england", "scotland", "wales"],
+    "germany": ["germany"],
+    "france": ["france"],
+    "spain": ["spain"],
+    "netherlands": ["netherlands"],
+    "poland": ["poland"],
+    "ireland": ["ireland"],
+    "portugal": ["portugal"],
+    "italy": ["italy"],
+    "sweden": ["sweden"],
+    "switzerland": ["switzerland"],
+    "austria": ["austria"],
+    "belgium": ["belgium"],
+    "denmark": ["denmark"],
+    "norway": ["norway"],
+    "finland": ["finland"],
+}
+US_COUNTRY_VARIANTS = {
+    "us": ["us", "usa", "united states", "america"],
+}
+APAC_COUNTRY_VARIANTS = {
+    "india": ["india"], "singapore": ["singapore"], "japan": ["japan"], "china": ["china"],
+    "australia": ["australia"], "new zealand": ["new zealand"], "korea": ["korea"],
+    "philippines": ["philippines"], "vietnam": ["vietnam"], "indonesia": ["indonesia"],
+    "hong kong": ["hong kong"], "thailand": ["thailand"], "malaysia": ["malaysia"],
+}
+MIDDLE_EAST_COUNTRY_VARIANTS = {
+    "uae": ["uae", "dubai", "abu dhabi"], "saudi": ["saudi"], "qatar": ["qatar"],
+    "kuwait": ["kuwait"], "bahrain": ["bahrain"], "oman": ["oman"], "israel": ["israel"],
+}
+
+_REGION_COUNTRY_VARIANTS = {
+    "europe": EUROPE_COUNTRY_VARIANTS,
+    "us": US_COUNTRY_VARIANTS,
+    "apac": APAC_COUNTRY_VARIANTS,
+    "middle_east": MIDDLE_EAST_COUNTRY_VARIANTS,
+}
 
 # Broad (continent/region-level) tags — used for coarse SOURCE-level gating,
 # where being generous is correct: a candidate who said "Europe" broadly
 # should still see Arbeitnow offered as an option.
 REGION_KEYWORDS = {
-    "europe": ["europe", "eu"] + EUROPE_COUNTRIES,
-    "us": ["north america"] + US_COUNTRIES,
-    "apac": ["apac", "asia"] + APAC_COUNTRIES,
-    "middle_east": ["middle east", "gulf", "gcc"] + MIDDLE_EAST_COUNTRIES,
+    "europe": ["europe", "eu"] + [v for variants in EUROPE_COUNTRY_VARIANTS.values() for v in variants],
+    "us": ["north america"] + [v for variants in US_COUNTRY_VARIANTS.values() for v in variants],
+    "apac": ["apac", "asia"] + [v for variants in APAC_COUNTRY_VARIANTS.values() for v in variants],
+    "middle_east": ["middle east", "gulf", "gcc"] + [v for variants in MIDDLE_EAST_COUNTRY_VARIANTS.values() for v in variants],
 }
 
 
@@ -582,13 +670,15 @@ def _country_hits(text: str) -> set[str]:
     'europe'/'apac'/'middle east') — used for onsite LISTING-level mismatch
     checks, where specificity matters: a candidate who said 'Europe' broadly
     shouldn't have a Germany listing dropped, but one who said 'UK'
-    specifically should."""
+    specifically should. Returns CANONICAL country keys (e.g. 'uk', not
+    whichever variant text matched) so 'UK' and 'United Kingdom' are treated
+    as the same country by callers comparing hits via set membership."""
     text = (text or "").lower()
     hits = set()
-    for keywords in (EUROPE_COUNTRIES, APAC_COUNTRIES, MIDDLE_EAST_COUNTRIES, US_COUNTRIES):
-        for kw in keywords:
-            if _kw_in(text, kw):
-                hits.add(kw)
+    for variants_by_country in _REGION_COUNTRY_VARIANTS.values():
+        for canonical, variants in variants_by_country.items():
+            if any(_kw_in(text, kw) for kw in variants):
+                hits.add(canonical)
     return hits
 
 

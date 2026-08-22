@@ -77,10 +77,19 @@ loop: compile → render the page(s) with `pdftoppm` → Gemini (vision)
 checks the image for structural defects (not style/taste) → if flagged,
 the defect image + reason go back to Gemini for a small, targeted fix →
 recompile → recheck. Up to 3 attempts; every corrective edit is
-re-validated structurally (preamble/section guardrails) before being
-trusted. Still broken after 3 attempts → falls back to your untouched base
-CV, visible in the report itself (each candidate's CV line is tagged
+re-validated structurally (every original section still present) before
+being trusted. Still broken after 3 attempts → falls back to your untouched
+base CV, visible in the report itself (each candidate's CV line is tagged
 "tailored" or "base CV (tailoring unavailable)").
+
+Gemini is never asked to reproduce the CV's LaTeX preamble (fonts, margins,
+macros) at all — only the document content. The real preamble is spliced
+back on before every compile, so there's no risk of the model drifting on
+formatting infrastructure it was never asked to touch in the first place.
+(An earlier version asked for the whole file and diffed the preamble
+byte-for-byte, which meant almost any whitespace-level difference in the
+model's reproduction silently discarded the tailoring and fell back to the
+base CV — fixed structurally rather than by loosening the check.)
 
 `--import-cv` reconstruction runs through the same loop, adapted for a
 full reconstruction rather than a small edit — see "Updating your CV
@@ -248,7 +257,26 @@ aborting when a fix breaks structural validation), the geography-gating
 logic, and the cross-run lessons persistence have all been exercised
 against the real toolchain, not just mocked. Source parsing, Search's
 plan-parsing, Rank's scoring, and full graph routing are covered by
-mocked-response tests. Not yet exercised: a live run against the real
-internet + a real Gemini key — Arbeitnow/OpenAlex/Himalayas/arXiv/Gemini
-calls haven't been made for real. If something breaks on your first live
-run, `logs/pipeline.log` will show exactly which round/source/call failed.
+mocked-response tests.
+
+**Exercised against the real internet + a real Gemini key** as of a live run
+on 22 Aug 2026 (`--import-cv` → `--setup` → a full `job`-track run against
+Arbeitnow UK). That run surfaced two real bugs, both now fixed:
+
+- CV tailoring was silently falling back to the untailored base CV on
+  essentially every application, because `cv_tailor.py`'s structural
+  validator required Gemini to reproduce the entire LaTeX preamble
+  byte-for-byte and had no retry on failure. Fixed the same way
+  `cv_import.py` had already fixed the identical problem: the model is
+  never shown or asked for the preamble at all anymore, only the document
+  body — see "CV formatting" above.
+- The `--setup` questionnaire's warm-start disambiguation step asked a
+  spurious clarifying question about an already-unambiguous target start
+  date, because none of the Gemini prompts told the model what today's
+  actual date is — it was reasoning from its training cutoff instead.
+  Fixed by interpolating a `TODAY'S DATE` line into every prompt that
+  reasons about dates (`SEARCH_PROMPT`, `RANK_PROMPT`, the warm-start
+  prompt) — see "Date grounding" in `CLAUDE.md`.
+
+If something else breaks on a live run, `logs/pipeline.log` will show
+exactly which round/source/call failed.

@@ -15,6 +15,7 @@ import re
 import time
 import logging
 import hashlib
+from datetime import date
 
 from google import genai
 
@@ -71,6 +72,12 @@ def _check_date_match(text: str, target_start: str) -> bool:
 
 SEARCH_PROMPT = """
 You are the search-planning step of a job/research-opportunity discovery agent.
+
+TODAY'S DATE: {today}
+(Your training data has a cutoff well before this date — trust this line as the
+real current date, not your own sense of "now". Dates in the profile or in
+postings may be later than your training cutoff; that does not make them
+invalid or worth questioning.)
 
 CANDIDATE PROFILE:
 {profile_summary}
@@ -176,6 +183,7 @@ def run_search_round(state: dict) -> dict:
             )
 
     prompt = SEARCH_PROMPT.format(
+        today=date.today().strftime("%d %b %Y"),
         profile_summary=profile_summary,
         sources=_source_descriptions(pool),
         history=history_text,

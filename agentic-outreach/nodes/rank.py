@@ -10,6 +10,7 @@ import json
 import re
 import time
 import logging
+from datetime import date
 
 from google import genai
 
@@ -26,6 +27,12 @@ for the next search round — this feedback directly steers what gets searched n
 so be specific (e.g. "results skew senior/PI level, try emphasising 'postdoc' or
 'PhD student' terms" or "Arbeitnow returned nothing relevant, try RemoteOK instead"
 or "good hits, keep searching this direction").
+
+TODAY'S DATE: {today}
+(Your training data has a cutoff well before this date — use this line, not your
+own sense of "now", as the reference point for the Recency criterion below and for
+judging start dates. A posting or start date later than your training cutoff is
+not invalid or suspicious — it's simply in the future relative to your training.)
 
 CANDIDATE PROFILE:
 {profile_summary}
@@ -140,6 +147,7 @@ def run_rank_round(state: dict) -> dict:
     } for c in unranked[:10]]  # slightly smaller batch to offset the longer descriptions
 
     prompt = RANK_PROMPT.format(
+        today=date.today().strftime("%d %b %Y"),
         profile_summary=profile_summary,
         cv_fingerprint=cv_fingerprint,
         track=state["track"],

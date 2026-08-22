@@ -1,5 +1,16 @@
 """
 nodes/cv_tailor.py — Tailor LaTeX CV per candidate, compile to PDF.
+
+IMPORTANT DESIGN NOTE — the model's own preamble output is NEVER requested or
+used, same fix as nodes/cv_import.py (see that file's docstring for the full
+history). Earlier versions asked the model to reproduce the whole base CV,
+preamble included, byte-for-byte identical, then rejected the whole tailoring
+attempt on the slightest whitespace/formatting drift in the preamble it never
+needed to touch in the first place — with no retry, straight to the untailored
+base CV. Fixed the same way: the model is only ever shown/asked for the
+document body (\\begin{document}...\\end{document}); the real preamble is
+sliced off cv_base.tex once and spliced back on ourselves before every
+compile attempt. See build_tailored_cv / _react_fix_and_compile below.
 """
 
 import os
@@ -31,6 +42,10 @@ specific application. This is NOT a rewrite. Think of this as what a careful hum
 would do in 5 minutes before hitting submit — small, defensible tweaks, not a
 redesign.
 
+You do NOT need to write any \\documentclass/\\usepackage/\\newcommand formatting
+infrastructure — that's handled separately and is never touched. You only
+produce the document body, from \\begin{{document}} to \\end{{document}}.
+
 OPPORTUNITY:
 {opp_summary}
 
@@ -38,33 +53,29 @@ INSTRUCTIONS FROM THE CANDIDATE ABOUT WHAT TO PROTECT / HOW TO EDIT
 (these override any default assumption you'd otherwise make — follow them exactly):
 {cv_instructions}
 
-BASE CV (LaTeX):
-{base_cv}
+BASE CV DOCUMENT BODY (LaTeX, from \\begin{{document}} to \\end{{document}}):
+{base_body}
 
 HARD RULES:
-1. PREAMBLE IS FROZEN. Everything from \\documentclass down to \\begin{{document}}
-   (all \\usepackage, \\newcommand, \\geometry, custom macros) must be reproduced
-   byte-for-byte identical. Do not touch formatting infrastructure — only the
-   content between \\begin{{document}} and \\end{{document}} may change.
-2. EVERY \\section{{...}} that exists in the base CV must still exist in your
+1. EVERY \\section{{...}} that exists in the base CV must still exist in your
    output, with the same section name. You may reorder sections, and you may
    shorten or trim entries within a section, but you may not delete a section
    outright or leave it looking sparse/empty — a thin-looking section reads
    worse than a slightly long CV.
-3. Anything the candidate's instructions above mark as protected must be
+2. Anything the candidate's instructions above mark as protected must be
    reproduced exactly as-is — same wording, same order, no trimming.
-4. For sections NOT marked protected: prefer MINOR tweaks — reordering bullets
+3. For sections NOT marked protected: prefer MINOR tweaks — reordering bullets
    within an entry, light rewording toward the opportunity's terminology, adding
    a real skill/tool already on the CV to a more prominent spot for ATS
    matching. Do NOT invent skills, projects, or experience that aren't already
    on the base CV.
-5. One page is a nice-to-have, not a hard requirement — do not gut real content
+4. One page is a nice-to-have, not a hard requirement — do not gut real content
    just to hit one page. If it doesn't comfortably fit one page after minor
    trims, two pages with full substance is better than one page that reads
    empty.
-6. Do not add new LaTeX commands or packages not already used in the base CV.
-7. Return ONLY the complete modified LaTeX source, from \\documentclass to
-   \\end{{document}}. No explanation, no markdown fences.
+5. Do not add new LaTeX commands or packages not already used in the base CV.
+6. Return ONLY the document body, from \\begin{{document}} to \\end{{document}}.
+   No explanation, no markdown fences, no preamble.
 """
 
 
@@ -84,23 +95,19 @@ def _extract_sections(latex: str) -> set:
     return set(re.findall(r"\\section\{([^}]+)\}", latex))
 
 
-def _validate_tailored_cv(base_cv: str, tailored: str) -> tuple[bool, str]:
-    """Structural sanity check — catches the model silently dropping sections
-    or mangling the preamble, before we ever compile it."""
-    if "\\begin{document}" not in tailored or "\\end{document}" not in tailored:
+def _validate_tailored_body(base_cv: str, tailored_body: str) -> tuple[bool, str]:
+    """Structural sanity check on the document body only — catches the model
+    silently dropping a section or truncating its response. No preamble
+    concerns here at all: the model is never shown or asked for the preamble
+    (see module docstring), so there's nothing to diff or drift there."""
+    if "\\begin{document}" not in tailored_body or "\\end{document}" not in tailored_body:
         return False, "missing \\begin{document}/\\end{document}"
 
     base_sections = _extract_sections(base_cv)
-    tailored_sections = _extract_sections(tailored)
+    tailored_sections = _extract_sections(tailored_body)
     missing = base_sections - tailored_sections
     if missing:
         return False, f"sections dropped: {missing}"
-
-    # Preamble should be identical up to \begin{document}
-    base_preamble = base_cv.split("\\begin{document}")[0]
-    tailored_preamble = tailored.split("\\begin{document}")[0]
-    if base_preamble.strip() != tailored_preamble.strip():
-        return False, "preamble was modified (formatting infrastructure changed)"
 
     return True, "ok"
 
@@ -137,46 +144,44 @@ def compile_to_pdf(latex_source: str, output_name: str) -> str | None:
 
 
 FIX_COMPILE_ERROR_PROMPT = """
-The LaTeX below failed to compile. Fix ONLY what's necessary to make it
-compile — do not restructure content, do not touch the preamble (everything
-down to \\begin{{document}} must stay byte-identical), and keep every
-\\section{{...}} that currently exists.
+The LaTeX document body below (from \\begin{{document}} to \\end{{document}})
+failed to compile. Fix ONLY what's necessary to make it compile — do not
+restructure content, and keep every \\section{{...}} that currently exists.
 
 COMPILE ERROR OUTPUT:
 {error_log}
 
-LATEX THAT FAILED:
-{latex}
+DOCUMENT BODY THAT FAILED:
+{body}
 
-Return ONLY the complete corrected LaTeX source, from \\documentclass to
+Return ONLY the corrected document body, from \\begin{{document}} to
 \\end{{document}}. No explanation, no markdown fences.
 """
 
 FIX_VISUAL_ISSUE_PROMPT = """
-The LaTeX below compiled successfully, but a visual check of the rendered PDF
-(image(s) attached) found a rendering defect: {reason}
+The LaTeX document body below compiled successfully, but a visual check of the
+rendered PDF (image(s) attached) found a rendering defect: {reason}
 
 Fix ONLY this specific defect with a small, targeted edit — e.g. trim a line,
 tighten a bullet, move a small amount of content — do not restructure the CV,
-do not touch the preamble (everything down to \\begin{{document}} must stay
-byte-identical), and keep every \\section{{...}} that currently exists.
+and keep every \\section{{...}} that currently exists.
 
-LATEX:
-{latex}
+DOCUMENT BODY:
+{body}
 
-Return ONLY the complete corrected LaTeX source, from \\documentclass to
+Return ONLY the corrected document body, from \\begin{{document}} to
 \\end{{document}}. No explanation, no markdown fences.
 """
 
 
-def _fix_compile_error(latex: str, error_log: str) -> str:
-    prompt = FIX_COMPILE_ERROR_PROMPT.format(error_log=error_log[:2000], latex=latex)
+def _fix_compile_error(body: str, error_log: str) -> str:
+    prompt = FIX_COMPILE_ERROR_PROMPT.format(error_log=error_log[:2000], body=body)
     return _call_gemini(prompt)
 
 
-def _fix_visual_issue(latex: str, images: list[bytes], reason: str) -> str:
+def _fix_visual_issue(body: str, images: list[bytes], reason: str) -> str:
     parts = [types.Part.from_bytes(data=img, mime_type="image/png") for img in images]
-    parts.append(FIX_VISUAL_ISSUE_PROMPT.format(reason=reason, latex=latex))
+    parts.append(FIX_VISUAL_ISSUE_PROMPT.format(reason=reason, body=body))
     try:
         resp = client.models.generate_content(model=GEMINI_MODEL, contents=parts)
         text = resp.text.strip()
@@ -188,25 +193,28 @@ def _fix_visual_issue(latex: str, images: list[bytes], reason: str) -> str:
         return ""
 
 
-def _react_fix_and_compile(latex: str, base_cv: str, candidate_id: str) -> tuple[str | None, bool]:
+def _react_fix_and_compile(base_preamble: str, body: str, base_cv: str, candidate_id: str) -> tuple[str | None, bool]:
     """Compile -> render -> vision-check -> self-correct, up to
-    MAX_REACT_ATTEMPTS. Every corrective edit is re-validated structurally
-    (same guardrail as the initial tailor) before being trusted — a
-    correction that breaks structure aborts the loop rather than being used.
-    Returns (pdf_path, success)."""
-    current_latex = latex
+    MAX_REACT_ATTEMPTS. The real preamble is spliced onto the model's body
+    before every compile attempt — the model itself never sees or produces
+    it, so there's no preamble drift possible at any point in the loop. Every
+    corrective edit to the body is re-validated structurally (section
+    completeness) before being trusted — a correction that drops a section
+    aborts the loop rather than being used. Returns (pdf_path, success)."""
+    current_body = body
 
     for attempt in range(1, MAX_REACT_ATTEMPTS + 1):
-        pdf_path, error_log = compile_with_log(current_latex, f"cv_react_{candidate_id}_a{attempt}")
+        full_latex = base_preamble + current_body
+        pdf_path, error_log = compile_with_log(full_latex, f"cv_react_{candidate_id}_a{attempt}")
 
         if not pdf_path:
             log.warning(f"    [ReAct {attempt}/{MAX_REACT_ATTEMPTS}] compile failed — asking Gemini to fix...")
-            fixed = _fix_compile_error(current_latex, error_log)
-            ok, reason = _validate_tailored_cv(base_cv, fixed) if fixed else (False, "empty response")
+            fixed = _fix_compile_error(current_body, error_log)
+            ok, reason = _validate_tailored_body(base_cv, fixed) if fixed else (False, "empty response")
             if not ok:
                 log.warning(f"    Fix attempt failed validation ({reason}) — giving up on ReAct loop.")
                 return None, False
-            current_latex = fixed
+            current_body = fixed
             continue
 
         images = render_pdf_pages(pdf_path)
@@ -218,12 +226,12 @@ def _react_fix_and_compile(latex: str, base_cv: str, candidate_id: str) -> tuple
         if attempt == MAX_REACT_ATTEMPTS:
             break
 
-        fixed = _fix_visual_issue(current_latex, images, reason)
-        ok, val_reason = _validate_tailored_cv(base_cv, fixed) if fixed else (False, "empty response")
+        fixed = _fix_visual_issue(current_body, images, reason)
+        ok, val_reason = _validate_tailored_body(base_cv, fixed) if fixed else (False, "empty response")
         if not ok:
             log.warning(f"    Fix attempt failed validation ({val_reason}) — giving up on ReAct loop.")
             return None, False
-        current_latex = fixed
+        current_body = fixed
 
     return None, False
 
@@ -236,6 +244,9 @@ def build_tailored_cv(candidate: dict, profile: dict) -> str | None:
     broken after retries — same safety net as before, just triggered by a
     stricter check."""
     base_cv = _load_base_cv()
+    base_preamble = base_cv.split("\\begin{document}")[0]
+    base_body = base_cv[base_cv.index("\\begin{document}"):]
+
     opp_summary = (
         f"Name/Title: {candidate['name']}\n"
         f"Organization: {candidate['org']}\n"
@@ -248,25 +259,20 @@ def build_tailored_cv(candidate: dict, profile: dict) -> str | None:
         "elsewhere)"
     )
     prompt = TAILOR_PROMPT.format(
-        opp_summary=opp_summary, cv_instructions=cv_instructions, base_cv=base_cv
+        opp_summary=opp_summary, cv_instructions=cv_instructions, base_body=base_body
     )
 
-    latex = _call_gemini(prompt)
+    body = _call_gemini(prompt)
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", candidate["name"])[:40]
     used_fallback = False
     pdf_path = None
 
-    if latex:
-        ok, reason = _validate_tailored_cv(base_cv, latex)
-        if not ok:
-            log.warning(f"  Tailored CV failed structural validation ({reason}) — falling back to base CV.")
-            used_fallback = True
-    else:
-        log.warning("  Tailoring returned no content — falling back to base CV.")
+    if not body or "\\begin{document}" not in body or "\\end{document}" not in body:
+        log.warning("  Tailoring returned no usable content — falling back to base CV.")
         used_fallback = True
 
     if not used_fallback:
-        pdf_path, success = _react_fix_and_compile(latex, base_cv, candidate["id"])
+        pdf_path, success = _react_fix_and_compile(base_preamble, body, base_cv, candidate["id"])
         if not success:
             log.warning("  ReAct compile/visual-check loop exhausted — falling back to base CV.")
             used_fallback = True

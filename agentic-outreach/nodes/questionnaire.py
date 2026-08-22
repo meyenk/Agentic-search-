@@ -13,6 +13,7 @@ import json
 import os
 import re
 import logging
+from datetime import date
 from google import genai
 
 from config import PROFILE_PATH, GEMINI_API_KEY, GEMINI_MODEL
@@ -45,6 +46,13 @@ THIS candidate. If the CV and answers already give a focused, unambiguous
 picture, do not invent a question — most candidates should get
 needs_clarification: false.
 
+TODAY'S DATE: {today}
+(Your training data has a cutoff well before this date — trust this line as the
+real current date, not your own sense of "now". A target start date or program
+year later than your training cutoff is not ambiguous or worth questioning on
+those grounds alone — only flag it if the CV/answers themselves are internally
+inconsistent about timing.)
+
 CV FINGERPRINT:
 {fingerprint}
 
@@ -61,6 +69,7 @@ def _generate_warm_start_question(cv_fingerprint: str, profile_so_far: dict) -> 
     warm start for Search's first round, not a replacement for the fixed
     questionnaire fields. Returns None if nothing's genuinely ambiguous."""
     prompt = WARM_START_PROMPT.format(
+        today=date.today().strftime("%d %b %Y"),
         fingerprint=cv_fingerprint[:1500],
         answers=json.dumps(profile_so_far, indent=2),
     )

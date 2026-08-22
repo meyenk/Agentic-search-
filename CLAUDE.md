@@ -68,6 +68,15 @@ between nodes.
 - **report** (`nodes/report.py`) — renders `output/drafts_<timestamp>.html`, opened in the browser
   by `run.py`. This is the only user-facing checkpoint; review/edit/send happens by hand from here.
 
+**Date grounding:** `SEARCH_PROMPT`, `RANK_PROMPT`, and `questionnaire.py`'s `WARM_START_PROMPT`
+all interpolate a `TODAY'S DATE: {today}` line from `datetime.date.today()`. Without it, Gemini has
+no way to know the real wall-clock date — only its training cutoff — and will reason about
+`target_start_date`/posting recency/"is this ambiguous" using a stale or absent sense of "now"
+(this is what caused the setup questionnaire to ask a spurious disambiguating question about a
+target start date that was already unambiguous in the profile). If you add a new Gemini call that
+reasons about dates (recency, "is this realistic/upcoming", a fixed-cycle start date), give it the
+same `today` line rather than assuming the model can infer it.
+
 ### Source registry and geography gating (`sources/registry.py`)
 
 Nine free, no-key APIs (5 job boards, 4 academic) are exposed as plain functions with a docstring
@@ -91,18 +100,27 @@ correction attempts, each re-validated structurally before being trusted. `cv_ta
 back to the untouched base CV if the loop is exhausted; this is visible in the report itself
 (CV line tagged "tailored" vs "base CV (tailoring unavailable)").
 
-**Important invariant in `cv_import.py`:** the model's own LaTeX preamble output is never used.
-Identity fields (`\name`, `\emaila`, `\linkedin`, `\githuburl`) are extracted independently from
-the model's response and spliced onto the skeleton's frozen preamble block
-(`_skeleton_frozen_block`, split on the `%----------END FROZEN FORMATTING BLOCK----------` marker
-in `templates/skeleton.tex`) — the model is only ever asked for 4 identity lines + the document
-body, never the preamble itself. If you touch this file, preserve that split; the earlier design
-(ask model to reproduce the whole preamble byte-identically) silently reverted real names back to
-placeholders because the identity commands lived inside the "frozen" block being diffed.
+**Important invariant, shared by both `cv_import.py` and `cv_tailor.py`:** the model's own LaTeX
+preamble output is never requested or used, in either file. In `cv_import.py`, identity fields
+(`\name`, `\emaila`, `\linkedin`, `\githuburl`) are extracted independently from the model's
+response and spliced onto the skeleton's frozen preamble block (`_skeleton_frozen_block`, split on
+the `%----------END FROZEN FORMATTING BLOCK----------` marker in `templates/skeleton.tex`) — the
+model is only ever asked for 4 identity lines + the document body, never the preamble itself. In
+`cv_tailor.py`, the model is only ever shown/asked for the document body (`\begin{document}` to
+`\end{document}`); the real preamble is sliced off `cv_base.tex` once per call and spliced back on
+before every compile attempt (`build_tailored_cv` / `_react_fix_and_compile`). If you touch either
+file, preserve that split; the earlier design in both (ask the model to reproduce the whole
+preamble byte-identically, then diff it) silently broke things in two different ways — `cv_import`
+reverted real names back to placeholders because the identity commands lived inside the "frozen"
+block being diffed, and `cv_tailor` fell back to the untailored base CV on essentially every run
+because any whitespace-level drift in the model's preamble reproduction failed the diff, with no
+retry.
 
-Structural validation (`_validate_tailored_cv` / `_validate_import_body`) checks the preamble is
-untouched and no `\section{...}` was dropped, *before* every compile attempt in both ReAct loops —
-a correction that fails this check aborts the loop rather than being used.
+Structural validation (`_validate_tailored_body` / `_validate_import_body`) checks the document
+body only — document tags present, no `\section{...}` dropped — *before* every compile attempt in
+both ReAct loops; a correction that fails this check aborts the loop rather than being used. There
+is no preamble check in either validator anymore, since neither file ever gives the model a chance
+to touch the preamble in the first place.
 
 ### Cross-run persistence
 
